@@ -22,6 +22,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicLong;
 
 import io.etcd.jetcd.Maintenance;
+import io.etcd.jetcd.api.SnapshotResponse;
 import io.etcd.jetcd.grpc.GrpcService;
 import io.etcd.jetcd.maintenance.AlarmResponse;
 import io.etcd.jetcd.maintenance.DefragmentResponse;
@@ -29,6 +30,7 @@ import io.etcd.jetcd.maintenance.HashKVResponse;
 import io.etcd.jetcd.maintenance.HashResponse;
 import io.etcd.jetcd.maintenance.MoveLeaderResponse;
 import io.etcd.jetcd.maintenance.StatusResponse;
+import io.vertx.core.streams.ReadStream;
 
 import static io.etcd.jetcd.common.Preconditions.checkArgument;
 import static io.etcd.jetcd.common.exception.EtcdExceptionFactory.toEtcdException;
@@ -116,20 +118,27 @@ final class MaintenanceClient extends AbstractClient implements Maintenance {
             if (ar.failed()) {
                 answer.completeExceptionally(toEtcdException(ar.cause()));
             } else {
-                ar.result().handler(r -> {
-                    try {
-                        r.getBlob().writeTo(outputStream);
-                        bytes.addAndGet(r.getBlob().size());
-                    } catch (IOException e) {
-                        answer.completeExceptionally(toEtcdException(e));
-                    }
+                SerialExecutor serialExecutor = new SerialExecutor();
+                ReadStream<SnapshotResponse> rs = ar.result();
+                rs.pause();
+                rs.handler(r -> {
+                    serialExecutor.executeBlocking(() -> {
+                        rs.pause();
+                        try {
+                            r.getBlob().writeTo(outputStream);
+                            bytes.addAndGet(r.getBlob().size());
+                        } catch (IOException e) {
+                            answer.completeExceptionally(toEtcdException(e));
+                        }
+                    }).onComplete(v -> rs.resume());
                 });
-                ar.result().endHandler(event -> {
+                rs.endHandler(event -> {
                     answer.complete(bytes.get());
                 });
-                ar.result().exceptionHandler(e -> {
+                rs.exceptionHandler(e -> {
                     answer.completeExceptionally(toEtcdException(e));
                 });
+                rs.resume();
             }
         });
 

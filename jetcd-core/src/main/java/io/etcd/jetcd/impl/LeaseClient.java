@@ -36,6 +36,7 @@ import io.etcd.jetcd.lease.LeaseRevokeResponse;
 import io.etcd.jetcd.lease.LeaseTimeToLiveResponse;
 import io.etcd.jetcd.options.LeaseOption;
 import io.etcd.jetcd.support.CloseableClient;
+import io.vertx.core.Vertx;
 import io.vertx.core.streams.ReadStream;
 import io.vertx.core.streams.WriteStream;
 
@@ -221,17 +222,27 @@ final class LeaseClient extends AbstractClient implements Lease {
         public void doStart() {
             client.leaseKeepAlive((writeStream, err) -> {
                 if (err != null) {
-                    handleException(err);
+                    Vertx.currentContext().executeBlocking(() -> {
+                        handleException(err);
+                        return null;
+                    }, false);
                 } else {
                     writeHandler(writeStream);
                 }
             }).onComplete(ar -> {
                 if (ar.failed()) {
-                    handleException(ar.cause());
+                    Vertx.currentContext().executeBlocking(() -> {
+                        handleException(ar.cause());
+                        return null;
+                    }, false);
                 } else {
+                    SerialExecutor serialExecutor = new SerialExecutor();
                     ReadStream<io.etcd.jetcd.api.LeaseKeepAliveResponse> readStream = ar.result();
-                    readStream.handler(this::handleResponse);
-                    readStream.exceptionHandler(this::handleException);
+                    readStream.pause();
+                    readStream.handler(response -> serialExecutor.executeBlocking(() -> handleResponse(response))
+                        .onComplete(v -> readStream.resume()));
+                    readStream.exceptionHandler(t -> serialExecutor.executeBlocking(() -> handleException(t)));
+                    readStream.resume();
                 }
             });
         }
@@ -332,7 +343,10 @@ final class LeaseClient extends AbstractClient implements Lease {
 
                     keepAlives.values().removeIf(ka -> {
                         if (ka.getDeadLine() < now) {
-                            ka.onCompleted();
+                            Vertx.currentContext().executeBlocking(() -> {
+                                ka.onCompleted();
+                                return null;
+                            }, false);
                             return true;
                         }
                         return false;

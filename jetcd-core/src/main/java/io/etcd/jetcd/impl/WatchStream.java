@@ -96,9 +96,16 @@ final class WatchStream {
                 handler.onWriteStreamReady(this);
             }
         }).map(rs -> {
-            rs.handler(handler::onMessage);
-            rs.endHandler(v -> handler.onEnd());
-            rs.exceptionHandler(handler::onError);
+            SerialExecutor serialExecutor = new SerialExecutor();
+            rs.pause();
+            rs.handler(response -> {
+                rs.pause();
+                serialExecutor.executeBlocking(() -> Exceptions.quietly(() -> handler.onMessage(response)))
+                    .onComplete(v -> rs.resume());
+            });
+            rs.endHandler(v -> serialExecutor.executeBlocking(() -> Exceptions.quietly(handler::onEnd)));
+            rs.exceptionHandler(t -> serialExecutor.executeBlocking(() -> Exceptions.quietly(() -> handler.onError(t))));
+            rs.resume();
             readStreamRef.set(rs);
             return null;
         });

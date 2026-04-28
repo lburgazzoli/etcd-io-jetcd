@@ -157,7 +157,10 @@ final class WatchReconnectionManager {
                     .cause(e.getLastException())
                     .build();
 
-                Exceptions.quietly(() -> listener.onRetry(ctx));
+                Vertx.currentContext().executeBlocking(() -> {
+                    Exceptions.quietly(() -> listener.onRetry(ctx));
+                    return null;
+                });
             })
             .build();
     }

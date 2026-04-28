@@ -20,6 +20,7 @@ import java.util.concurrent.CompletableFuture;
 
 import io.etcd.jetcd.ByteSequence;
 import io.etcd.jetcd.Election;
+import io.etcd.jetcd.common.exception.Exceptions;
 import io.etcd.jetcd.election.CampaignResponse;
 import io.etcd.jetcd.election.LeaderKey;
 import io.etcd.jetcd.election.LeaderResponse;
@@ -30,6 +31,8 @@ import io.etcd.jetcd.election.ResignResponse;
 import io.etcd.jetcd.grpc.GrpcService;
 import io.etcd.jetcd.support.Errors;
 import io.etcd.jetcd.support.Util;
+import io.vertx.core.Vertx;
+import io.vertx.core.streams.ReadStream;
 import io.vertx.grpc.client.InvalidStatusException;
 
 import com.google.protobuf.ByteString;
@@ -120,11 +123,25 @@ final class ElectionClient extends AbstractClient implements Election {
 
         client.observe(request).onComplete(ar -> {
             if (ar.failed()) {
-                listener.onError(toEtcdException(ar.cause()));
+                Vertx.currentContext().executeBlocking(() -> {
+                    listener.onError(toEtcdException(ar.cause()));
+                    return null;
+                }, false);
             } else {
-                ar.result().handler(value -> listener.onNext(responseFactory.newLeaderResponse(value)));
-                ar.result().endHandler(ignored -> listener.onCompleted());
-                ar.result().exceptionHandler(error -> listener.onError(toEtcdException(error)));
+                SerialExecutor serialExecutor = new SerialExecutor();
+                ReadStream<io.etcd.jetcd.api.LeaderResponse> rs = ar.result();
+                rs.pause();
+                rs.handler(value -> {
+                    rs.pause();
+                    serialExecutor
+                        .executeBlocking(
+                            () -> Exceptions.quietly(() -> listener.onNext(responseFactory.newLeaderResponse(value))))
+                        .onComplete(v -> rs.resume());
+                });
+                rs.endHandler(ignored -> serialExecutor.executeBlocking(() -> Exceptions.quietly(listener::onCompleted)));
+                rs.exceptionHandler(error -> serialExecutor
+                    .executeBlocking(() -> Exceptions.quietly(() -> listener.onError(toEtcdException(error)))));
+                rs.resume();
             }
         });
     }
